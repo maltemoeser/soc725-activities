@@ -1,0 +1,217 @@
+---
+title: "Power Analysis"
+author: "Malte Möser"
+date: "11/28/2016"
+output: html_document
+---
+
+```{r include=FALSE}
+options(scipen=8)
+set.seed = 42
+require(parallel)
+ncores = 3
+
+get_data_lnorm <- function(n, m, s) {
+  mu = log(m^2 / sqrt(s^2 + m^2))
+  sigma = sqrt(log(s^2/m^2 + 1))
+  rlnorm(n, mu, sigma)
+}
+```
+
+## Task
+
+Imagine that you are working as a data scientist at a tech company. Someone from the marketing department asks for your help in evaluating an experiment that they are planning in order to measure the Return on Investment (ROI) for a new online ad campaign. Before launching their experiment, the marketing department provides you with the following information based on their earlier research:
+
+- the mean sales per customer is $7 with a standard deviation of $75.
+- the campaign is expected to increase sales by $0.35 per customer which corresponds to an increase in profit of $0.175 per customer. 
+- the planned size of the experiment is 200,000 people, half in the treatment group and half in the control group.
+- the cost of the campaign is $0.14 per participant.
+
+```{r}
+mean.sales <- 7
+sd.sales <- 75
+sales.increase <- 0.35
+cost <- 0.14
+samplesize <- 100000
+```
+
+Write a memo evaluating this proposed experiment. Your memo should address: 
+
+1. Would you recommend launching this experiment as planned? If so, why? If not, why not?
+2. What sample size would you recommend for this experiment?
+
+
+## Memo
+
+We want to reliably detect a difference of $0.35 in the average sale per customer in a distribution that has a large standard deviation of $75.
+In theory, we are able to tell the two distributions apart by comparing their mean.
+For example, in the following plot we see the densities of two random samples (with $n$ = 2,000,000) from a lognormal-distributions with an arithmetic mean of $7.33 (red) and $6.99 (blue).
+
+```{r echo = FALSE}
+set.seed(42)
+d1 <- get_data_lnorm(2000000, mean.sales + sales.increase, sd.sales)
+d2 <- get_data_lnorm(2000000, mean.sales, sd.sales)
+plot(density(d2[d2 < 10]), col = "blue", main = "")
+abline(v = mean(d2), col = "blue")
+lines(density(d1[d1 < 10]), col = "red")
+abline(v = mean(d1), col = "red")
+```
+
+However, telling the two distributions becomes more difficult if we have [small sample sizes](https://en.wikipedia.org/wiki/Law_of_large_numbers#Weak_law).
+For example, in the following plot we see four distributions with $n$ = 100,000.
+The difference between the means is not always clear, and in the last plot the mean of the supposedly larger distribution is actually the smaller one!
+
+```{r echo = FALSE}
+set.seed(42000)
+par(mfrow=c(2,2))
+for(i in 1:4) {
+  d1 <- get_data_lnorm(100000, mean.sales + sales.increase, sd.sales)
+  d2 <- get_data_lnorm(100000, mean.sales, sd.sales)  
+  plot(density(d2[d2 < 10]), col = "blue", main = "")
+  abline(v = mean(d2), col = "blue")
+  lines(density(d1[d1 < 10]), col = "red")
+  abline(v = mean(d1), col = "red")
+}
+```
+
+So how large must our sample size be to reliably tell the two distributions apart?
+To answer this question, we will conduct a simulation with different values of $N$ to see which one is sufficiently large.
+Three other variables play a critical role do determine whether the experiment is likely to succeed (cf. Cohen 1992):
+
+- the significance criterion,
+- the population effect size,
+- and the statistical power.
+
+In our example, the effect size is given by the expected increase in sales by $0.35 per customer.
+Further, we choose common values of 0.95 for the significance criterion (the probability of incorrectly deciding that the distributions are not equal when they actually are) and 0.8 for statistical power (the probability of not detecting the difference even though it exists).
+
+Our simulation works as follows.
+First, we generate sales data based on a lognormal probability distribution.
+Then, we use a t-test to decide whether we can reject the null hypothesis that both distributions have equal means (which we know they do not) at a significance level of at least 0.95.
+We do this for different values of $N$ until we reach a power level of 0.8.
+
+
+```{r}
+# Get a lognormal distribution with arithmetic mean m and standard deviation s.
+# If we only used rlnorm(n, m, s) we would get a distribution with different mean and sd
+# and if we later did log(rlnorm(n, m, s)) we would end up with the normal distribution with mean m and sd s.
+get_data_lnorm <- function(n, m, s) {
+  mu = log(m^2 / sqrt(s^2 + m^2))
+  sigma = sqrt(log(s^2/m^2 + 1))
+  rlnorm(n, mu, sigma)
+}
+
+# get the p-values of two-sided t-tests for a given sample size
+get_p_values <- function(ssize, dy = 0.35) {
+  replicate(nIterations, t.test(
+    get_data_lnorm(ssize, mean.sales + dy, sd.sales),
+    get_data_lnorm(ssize, mean.sales, sd.sales)
+  )$p.value)
+}
+
+# get the power of our experiment
+share_below_pvalue <- function(pvalues, reference_value) {
+  sum(pvalues < reference_value) / length(pvalues)
+}
+
+# simulation parameters
+sim_n <- 1:10 * 100000
+nIterations <- 1000
+```
+
+We will now run our experiments for different values of $N$ with `r nIterations` iterations each:
+
+```{r cache = TRUE}
+# parallelized execution
+cl <- makeCluster(3, type = "FORK")
+pvalues <- parSapply(cl, sim_n, get_p_values)
+stopCluster(cl)
+```
+
+
+```{r}
+powers <- apply(pvalues, 2, function(x) {share_below_pvalue(x, 0.05)})
+names(powers) <- sim_n
+powers
+```
+
+We see that with $n$ = 700,000 we reach our desired power level of 0.8. That means we would have to increase the size of our experiment by a factor of 7 (1.4 million customers in total)!
+
+Is there anything else we could do? In Lewis and Rao (2015) we find the following formular for the relation between t-statistic $(t_{\Delta \bar y})$, sample size $(N)$, difference in means $(\Delta \bar y)$ and standard deviation ($\hat \sigma$):
+
+$$
+t_{\Delta \bar y} = \sqrt{\frac{N}{2}} \cdot (\frac{\Delta \bar y}{\hat \sigma})
+$$
+
+Since we are interested in the sample size $N$, we can write the formula as follows:
+
+$$
+N = \frac{2 t^2 \sigma^2}{(\Delta y)^2}
+$$
+
+If we assume that $t$ is constant for large sample sizes, then we can make the following observations from the formula:
+
+- $N$ grows quadratically in regards to an increase in the standard deviation $\sigma$
+- $N$ grows quadratically in regards to a decrease in the difference of means $\Delta y$ (put differently, if we can increase the effect size by a factor of 2, we can reduce our sample size by a factor of 4!)
+
+Since we are dealing with the marketing department, let's express the difference in effect size in terms of the Return on Investment (ROI) instead.
+The ROI in our case can be calculated as $(0.5 \Delta y - c) / c$, where $c$ is the cost per participant.
+Our initial campaign had an expected ROI of `r (0.5 * sales.increase - cost) / cost`.
+What would happen if we were able to double our ROI from 0.25 to 0.5?
+
+$$
+\Delta y = 2 \cdot (ROI \cdot c + c) 
+$$
+
+```{r}
+new_roi <- 0.5
+delta_y <- 2 * (new_roi * cost + cost)
+scale_samplesize <- (delta_y / sales.increase)^2
+new_samplesize <- round(700000 / scale_samplesize, 0)
+```
+
+To double the ROI we would need a treatment that increases sales by $`r delta_y`. In turn, we could reduce the required sample size by a factor of `r scale_samplesize` (i.e. $N$ = `r new_samplesize`).
+
+We can verify this number by running a new simulation:
+```{r cache = TRUE}
+new_p <- get_p_values(new_samplesize, delta_y)
+new_power <- share_below_pvalue(new_p, 0.05)
+```
+
+This simulation gives us a power level of `r new_power`, confirming our calculation above.
+
+Finally, let's assume we really want to run the experiment with the original samplesize of `r samplesize`.
+What ROI would we need to detect a difference in means?
+From the formula above we know that we would need to increase our initial sales difference between the two groups by a factor of $\sqrt{7} = 2.65$. That corresponds to a ROI of $(0.5 \cdot \sqrt{7} \cdot 0.35 - c) / c$ = `r round((0.5 * sqrt(7) * sales.increase - cost) / cost, 1)`.
+
+```{r cache = TRUE}
+new_delta_y <- sqrt(7) * sales.increase
+new_delta_p <- get_p_values(100000, new_delta_y)
+new_delta_power <- share_below_pvalue(new_delta_p, 0.05)
+```
+
+Indeed, the simulation with these figures gives us a power level of `r new_delta_power`.
+
+In conclusion, with a ROI of 25% we would need a sample size of around 700,000 customers (in each group). If we are able to increase the ROI to 50% we can reduce the sample size to somewhere around `r new_samplesize`. If we really want to run the study with only 100,000 customers in each group, we would need to achieve a ROI of `r round((0.5 * sqrt(7) * sales.increase - cost) / cost, 1)`!
+
+For all these calculations we assumed that the standard deviation is constant. As pointed out above, a reduction in the standard deviation leads to a quadratic reduction in the necessary samplesize.
+Ideally, the marketing department could come up with an experimental design that not only has a higher ROI, but also decreases the expected standard deviation.
+
+
+```{r include = FALSE}
+# Two other distributions that I tried
+# The distribution does not seem to make any difference
+
+# gamma distribution
+get_data_gamma <- function(n, m, s) {
+  shp <- m^2 / s^2
+  scl <- s^2 / m
+  rgamma(n, shp, scale = scl)
+}
+
+# normal distribution
+get_data_norm <- function(n, m, s) {
+  rnorm(n, mean = m, sd = s)
+}
+```
+
